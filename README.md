@@ -28,8 +28,7 @@ cpan String::Escape
 ```
 
 ## Notes:
-- ** It is recommended to backup your default user's directory before running
-this script ***
+- **It is recommended to backup your default user's directory before running this script**
 
 - If you don't see the result immediately, try restarting your Thunderbird.
 
