@@ -54,6 +54,7 @@ close(FD);
 our $cal_id;
 our $db_file;
 our $dbh;
+our @tables_with_item_id;
 
 my $prefs=$profile_path . "/prefs.js";
 open(FD, "<$prefs") or die "Cannot open preference file for reading";
@@ -112,7 +113,7 @@ while(<FD>){
 }
 
 #
-# Step 4: Inserting into tables.
+# Step 4: Database operations
 #
 our $method=${$cal_object->{METHOD}}[0];
 print "Method=$method\n";
@@ -130,6 +131,66 @@ our $item_flags = {
   recurrence_id_allday=>1<<9
 };
 
+sub get_tables_with_item_id {
+  my $sth = $dbh->prepare(qq(
+    SELECT name
+      FROM sqlite_master
+     WHERE
+           type='table'
+  ));
+  my @retValue;
+  $sth->execute;
+  while (my @row=$sth->fetchrow_array){
+    my $sth1 = $dbh->prepare(qq(pragma table_info($row[0])));
+    $sth1->execute;
+    my $recurrence_id_found=0;
+    my $item_id_found=0;
+    while (my @column_info = $sth1->fetchrow_array){
+      $item_id_found=1 if $column_info[1] eq 'item_id';
+      $recurrence_id_found=1 if $column_info[1] eq 'recurrence_id';
+    }
+    push(@retValue, {name=>$row[0], has_recurrence_id=>$recurrence_id_found})
+      if $item_id_found;
+  } 
+  return @retValue;
+}
+
+sub delete_all_by_item_id {
+  my $cal_id = shift;
+  my $item_id = shift;
+
+  for (@tables_with_item_id){
+    $dbh->prepare(qq(
+       DELETE FROM $_->{name}
+        WHERE cal_id=?
+          AND item_id=?))->execute($cal_id, $item_id);
+  }
+}
+
+sub delete_by_item_id {
+  my $cal_id = shift;
+  my $item_id = shift;
+  my $recurrence = shift;
+
+  for (@tables_with_item_id){
+    next if $recurrence->{datetime} and not $_->{has_recurrence_id};
+    my $query=qq(DELETE FROM $_->{name}  
+                  WHERE cal_id = ?
+                    AND item_id = ?
+    );
+    if ($_->{has_recurrence_id}){
+      $query .= $recurrence->{datetime}?
+                 qq(AND recurrence_id = ?) :
+                 qq(AND recurrence_id is NULL);
+    }
+    my $sth=$dbh->prepare($query);
+    if ($recurrence->{datetime}){
+      $sth->execute($cal_id, $item_id, $recurrence->{datetime});
+    } else {
+      $sth->execute($cal_id, $item_id);
+    }
+  }
+}
 
 sub getTZID{
   my $key=shift;
@@ -140,7 +201,7 @@ sub getTZID{
   my $len = length($tzidEQ);
   if (length($str) < $len || substr($str,0,$len) ne $tzidEQ){
     print "No TZID found\n";
-    return undef;
+    return 'floating';
   } 
   print "TZID is " . substr($str,$len) . "\n";
   return substr($str,$len);
@@ -169,7 +230,7 @@ sub dateToInt {
     my $year= $1 - 1900;
     my $month= $2 - 1;
     my $day = $3;
-    return (intTime=>mktime(0,0,0,$day, $month, $year),allDay=>1);
+    return (intTime=>mktime(0,0,0,$day, $month, $year) * 1e6, allDay=>1);
   }
 }
 
@@ -291,37 +352,6 @@ sub get_event_rec {
   return $sth->fetchrow_hashref;
 }
 
-sub delete_old_attendees {
-  my $cal_id = shift;
-  my $uid=shift;
-  my $recurrence=shift;
-  my $sth;
-
-  if ($recurrence->{datetime}){
-    $sth=$dbh->prepare(qq(
-      DELETE FROM cal_attendees
-      WHERE
-        cal_id=?
-      AND
-        item_id=?
-      AND
-        recurrence_id=?
-    ));     
-    $sth->execute($cal_id, $uid, $recurrence->{datetime});
-  } else {
-    $sth=$dbh->prepare(qq(
-      DELETE FROM cal_attendees
-      WHERE
-        cal_id=?
-      AND
-        item_id=?
-      AND
-        recurrence_id is NULL
-    ));
-    $sth->execute($cal_id, $uid);
-  }
-}
-
 sub insert_attendees {
   my $cal_id=shift;
   my $uid=shift;
@@ -346,17 +376,6 @@ sub insert_attendees {
   return $retvalue;
 }
 
-sub delete_old_rrules {
-  my $cal_id=shift;
-  my $item_id=shift;
-
-  my $sth = $dbh->prepare(qq(
-     DELETE FROM cal_recurrence
-      WHERE cal_id=?
-        AND item_id=?));
-  $sth->execute($cal_id, $item_id);
-}
-
 sub insert_recurrences {
   my $cal_id = shift;
   my $item_id = shift;
@@ -372,30 +391,6 @@ sub insert_recurrences {
     $retValue |= $item_flags->{has_recurrence} unless $rv<0;
   }
   return $retValue;
-}
-
-sub delete_old_attachments {
-  my $cal_id = shift;
-  my $item_id = shift;
-  my $recurrence = shift;
-  my $sth;
-  if ($recurrence->{datetime}){
-    $sth = $dbh->prepare(qq(
-      DELETE FROM cal_attachments
-       WHERE cal_id=?
-         AND item_id=?
-         AND recurrence_id=?
-    ));
-    $sth->execute($cal_id, $item_id, $recurrence->{datetime});
-  } else {
-    $sth = $dbh->prepare(qq(
-      DELETE FROM cal_attachments
-       WHERE cal_id=?
-         AND item_id=?
-         AND recurrence_id IS NULL
-    ));
-    $sth->execute($cal_id, $item_id);
-  }
 }
 
 sub insert_attachments {
@@ -418,30 +413,6 @@ sub insert_attachments {
   return $retValue;
 }
 
-sub delete_old_properties {
-  my $cal_id = shift;
-  my $item_id = shift;
-  my $recurrence = shift;
-  my $sth;
-  if ($recurrence->{datetime}){
-    $sth = $dbh->prepare(qq(
-      DELETE FROM cal_properties
-       WHERE cal_id=?
-         AND item_id=?
-         AND recurrence_id=?
-    ));
-    $sth->execute($cal_id, $item_id, $recurrence->{datetime});
-  } else {
-    $sth = $dbh->prepare(qq(
-      DELETE FROM cal_properties
-       WHERE cal_id=?
-         AND item_id=?
-         AND recurrence_id IS NULL
-    ));
-    $sth->execute($cal_id, $item_id);
-  }
-}
-
 sub insert_properties{
   my $cal_id=shift;
   my $item_id=shift;
@@ -462,31 +433,6 @@ sub insert_properties{
   return $retValue;
 }
 
-sub delete_old_relations {
-  my $cal_id = shift;
-  my $item_id = shift;
-  my $recurrence = shift;
-  my $sth;
-  if ($recurrence->{datetime}){
-    $sth = $dbh->prepare(qq(
-      DELETE FROM cal_relations
-       WHERE cal_id=?
-         AND item_id=?
-         AND recurrence_id=?
-    ));
-    $sth->execute($cal_id, $item_id, $recurrence->{datetime});
-  } else {
-    $sth = $dbh->prepare(qq(
-      DELETE FROM cal_relations
-       WHERE cal_id=?
-         AND item_id=?
-         AND recurrence_id IS NULL
-    ));
-    $sth->execute($cal_id, $item_id);
-  }
-}
-
-
 sub insert_relations{
   my $cal_id=shift;
   my $item_id=shift;
@@ -505,30 +451,6 @@ sub insert_relations{
     $retValue = $item_flags->{has_relations} unless $rv<0;
   }
   return $retValue;
-}
-
-sub delete_old_alarms {
-  my $cal_id = shift;
-  my $item_id = shift;
-  my $recurrence = shift;
-  my $sth;
-  if ($recurrence->{datetime}){
-    $sth = $dbh->prepare(qq(
-      DELETE FROM cal_alarms
-       WHERE cal_id=?
-         AND item_id=?
-         AND recurrence_id=?
-    ));
-    $sth->execute($cal_id, $item_id, $recurrence->{datetime});
-  } else {
-    $sth = $dbh->prepare(qq(
-      DELETE FROM cal_alarms
-       WHERE cal_id=?
-         AND item_id=?
-         AND recurrence_id IS NULL
-    ));
-    $sth->execute($cal_id, $item_id);
-  }
 }
 
 sub insert_alarms{
@@ -552,6 +474,56 @@ sub insert_alarms{
   return $retValue;
 }
 
+sub delete_event_or_todo {
+  my $table_name=shift;
+  my $cal_id = shift;
+  my $item_id = shift;
+
+  $dbh->prepare(qq(
+     DELETE FROM $table_name
+      WHERE
+            cal_id = ?
+        AND
+            id = ?
+  ))->execute($cal_id, $item_id);
+}
+
+sub delete_exception_entry{
+  my $table_name = shift;
+  my $cal_id = shift;
+  my $item_id = shift;
+  my $recurrence = shift;
+
+  my $sth = $dbh->prepare(qq(
+     DELETE FROM $table_name
+      WHERE
+        cal_id = ?
+      AND
+        id = ?
+      AND
+        recurrence_id = ? 
+  ));
+  $sth->execute($cal_id, $item_id, $recurrence->{datetime});
+}
+
+sub reset_exceptions {
+  my $table_name=shift;
+  my $cal_id=shift;
+  my $item_id=shift;
+
+  my $sth = $dbh->prepare(qq(
+     UPDATE $table_name
+        SET flags = flags & ~$item_flags->{has_exceptions}
+      WHERE
+         cal_id=?
+        AND
+         id=?
+        AND
+         recurrence_id is NULL
+     ));
+  $sth->execute($cal_id, $item_id);
+}
+
 sub update_exceptions {
   my $table_name=shift;
   my $cal_id=shift;
@@ -564,6 +536,8 @@ sub update_exceptions {
         cal_id=?
        AND
         id=?
+       AND
+        recurrence_id is NULL;
   ));
   $sth->execute($cal_id, $item_id);
 }
@@ -624,9 +598,8 @@ sub insert_todo {
   $flags |= $item_flags->{has_exceptions} if 
             not $recurrence->{datetime} 
             and count_exceptions('cal_todos', $cal_id, $item_id)>0;
-  $flags |= $item_flags->event_allday if 
+  $flags |= $item_flags->{event_allday} if 
             ($todo_rec->{DTSTART}->{datehash}->{allDay});
-  $flags |= $item_flags->{recurrence_id_allday} if $recurrence->{allDay};
   $dbh->prepare($query)->execute(
       $cal_id,
       $item_id,
@@ -694,7 +667,6 @@ sub update_todo {
   }
   $flags |= $item_flags->event_allday if 
               ($todo_rec->{DTSTART}->{datehash}->{allDay});
-  $flags |= $item_flags->{recurrence_id_allday} if $recurrence->{allDay};
    if ($recurrence->{datetime}){
      $dbh->prepare($query)->execute(
        $todo_rec->{'CREATED'}->{datehash}->{intTime},
@@ -753,7 +725,6 @@ sub insert_event {
             and count_exceptions('cal_events', $cal_id, $item_id)>0;
   $flags |= $item_flags->{event_allday} if
            ($event_rec->{DTSTART}->{datehash}->{allDay});
-  $flags |= $item_flags->{recurrence_id_allday} if $recurrence->{allDay};
   print "Insert Event\n";
  
   my $sth = $dbh->prepare(qq(
@@ -841,8 +812,7 @@ sub update_event {
            recurrence_id is NULL
     );
   }
-  $flags |= $item_flags->event_allday if ($event_rec->{DTSTART}->{datehash}->{allDay});
-  $flags |= $item_flags->{recurrence_id_allday} if $recurrence->{allDay};
+  $flags |= $item_flags->{event_allday} if ($event_rec->{DTSTART}->{datehash}->{allDay});
 
   if ($recurrence->{datetime}){
     $dbh->prepare($query)->execute(
@@ -912,9 +882,44 @@ sub write_todo {
   } else {
     insert_todo ($cal_id, $item_id, $recurrence, $todo_rec, $flags);
   }
-
 }
 
+sub add_exdate {
+  my $tname=shift;
+  my $cal_id=shift;
+  my $item_id=shift;
+  my $recurrence=shift;
+
+  my $exdate_str='EXDATE:';
+  my @time_arr=gmtime($recurrence->{datetime} / 1e6);
+  my $sec=$time_arr[0];
+  my $min=$time_arr[1];
+  my $hr=$time_arr[2];
+  my $dd=$time_arr[3];
+  my $mm=$time_arr[4]+1;
+  my $yyyy=$time_arr[5]+1900;
+  $exdate_str .= $yyyy;
+  $exdate_str .= $mm<10 ? '0' . $mm : $mm;
+  $exdate_str .= $dd<10 ? '0' . $dd : $dd;
+  if (not $recurrence->{allDay}){
+    $exdate_str .= 'T';
+    $exdate_str .= $hr<10 ? '0' . $hr : $hr;
+    $exdate_str .= $min<10 ? '0' . $min : $min;
+    $exdate_str .= $sec < 10 ? '0' . $sec: $sec;
+    $exdate_str .= 'Z';
+  }
+  $exdate_str .= "\r\n";
+  $dbh->prepare(qq(
+        INSERT INTO cal_recurrence(item_id, cal_id, icalString)
+        VALUES (?,?,?)))->execute($item_id, $cal_id, $exdate_str);
+
+  $dbh->prepare(qq(
+        UPDATE $tname
+           SET flags = flags | $item_flags->{has_recurrence}
+           WHERE id=?
+             AND cal_id=?
+             AND recurrence_id is NULL))->execute($item_id, $cal_id);
+}
 sub handle_main_part {
   print "Welcome to handle_main_part, cal_id: $cal_id\n";
   my $cur = shift;
@@ -1028,27 +1033,17 @@ sub handle_main_part {
       }
     }
     # Update tables
-    delete_old_attendees($cal_id, $main_part_rec{UID}, \%recurrence) if 
+    delete_by_item_id($cal_id, $main_part_rec{UID}, \%recurrence) if 
       $action eq 'U';
     $flags |= insert_attendees($cal_id, $main_part_rec{UID},
                                \%recurrence,\@attendees);
-    delete_old_rrules($cal_id, $main_part_rec{UID}) if 
-      $action eq 'U' and not $recurrence{datetime};
     $flags |= insert_recurrences($cal_id, $main_part_rec{UID}, \@rrules); 
-    delete_old_attachments($cal_id, $main_part_rec{UID}, 
-                           \%recurrence) if $action eq 'U';
     $flags |= insert_attachments($cal_id, $main_part_rec{UID}, \%recurrence, 
                                  \@attachments);
-    delete_old_properties($cal_id, $main_part_rec{UID}, \%recurrence) 
-           if $action eq 'U';
     $flags |= insert_properties($cal_id, $main_part_rec{UID}, \%recurrence, 
                                 \@properties); 
-    delete_old_relations($cal_id, $main_part_rec{UID}, \%recurrence) 
-           if $action eq 'U';
     $flags |= insert_relations($cal_id, $main_part_rec{UID}, \%recurrence, 
                                \@relations);
-    delete_old_alarms($cal_id, $main_part_rec{UID}, \%recurrence) 
-           if $action eq 'U';
     $flags |= insert_alarms($cal_id, $main_part_rec{UID}, \%recurrence,
                             \@alarms);
     if ($main_part_type eq 'VEVENT'){
@@ -1059,6 +1054,17 @@ sub handle_main_part {
                  $flags, $action);
     }
   } elsif ($method eq "CANCEL") {
+    my $tname = $main_part_type eq 'VEVENT'? 'cal_events':'cal_todos';
+    if ($recurrence{datetime}){
+      delete_by_item_id($cal_id, $main_part_rec{UID}, \%recurrence);
+      add_exdate($tname, $cal_id, $main_part_rec{UID}, \%recurrence);
+      delete_exception_entry($tname, $cal_id, $main_part_rec{UID}, \%recurrence);
+      reset_exceptions($tname, $cal_id, $main_part_rec{UID}) if 
+         count_exceptions($tname, $cal_id, $main_part_rec{UID})==0;
+    } else {
+      delete_event_or_todo($tname, $cal_id, $main_part_rec{UID});
+      delete_all_by_item_id($cal_id, $main_part_rec{UID});
+    }
   }
   $dbh->commit;
 }
@@ -1074,6 +1080,9 @@ my $username="";
 my $password="";
 $dbh=DBI->connect($dsn, $username, $password, {RaiseError=>1})
   or die $DBI::errstr;
+
+# A list of tables having a field named 'item_id'. 
+@tables_with_item_id = get_tables_with_item_id;
 
 my @nodes = ( $cal_object );
 print "DEBUG:  $cal_object->{children}\n";
