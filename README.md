@@ -32,6 +32,10 @@ cpan String::Escape
   The default profile is located in *~/.thunderbird/*, its name ends with '.default'.
 - **It is recommended to backup your default user's directory before running this script**
 
+- The script might not work when Thunderbird runs because the database is **LOCKED**. 
+  If you still want to run this script better stop Thunderbird. In addition, you can
+  connect to the database, and type:
+      ```pragma locking_mode=normal```
 - If you don't see the result immediately, try restarting your Thunderbird.
 
 - If you encounter any problem you can contact me via GitHub, or fix it
